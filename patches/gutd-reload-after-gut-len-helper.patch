@@ -1,0 +1,27 @@
+From c80f42d5b1c81e1de13e5e29350d7d2ec638cce6 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 16 Jun 2026 21:56:33 +0000
+Subject: [PATCH] Reload skb pointers after GUT length metadata write
+
+---
+ src/bpf/tc_gut_egress.bpf.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/bpf/tc_gut_egress.bpf.c b/src/bpf/tc_gut_egress.bpf.c
+index a836881..792a965 100644
+--- a/src/bpf/tc_gut_egress.bpf.c
++++ b/src/bpf/tc_gut_egress.bpf.c
+@@ -610,6 +610,10 @@ int gut_egress(struct __sk_buff *skb)
+         __u8 len_byte = (__u8)len_code;
+         if (bpf_skb_store_bytes(skb, new_quic_off + 8, &len_byte, 1, 0) < 0)
+             return TC_ACT_OK;
++        if (bpf_skb_pull_data(skb, skb->len) < 0)
++            return TC_ACT_OK;
++        data = (void *)(long)skb->data;
++        data_end = (void *)(long)skb->data_end;
+     }
+ #else  /* GUT_MODE_QUIC */
+     __u8 *quic = (__u8 *)data + new_quic_off;
+-- 
+2.43.0
+
