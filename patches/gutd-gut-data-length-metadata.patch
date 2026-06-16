@@ -1,0 +1,53 @@
+From 44c3e030df154a491c918dd1a2fdd44286d88f6a Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 16 Jun 2026 21:04:43 +0000
+Subject: [PATCH] Encode GUT data payload length metadata
+
+---
+ src/bpf/tc_gut_egress.bpf.c   | 11 +++++++++++
+ src/bpf/xdp_gut_ingress.bpf.c |  7 +++----
+ 2 files changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/src/bpf/tc_gut_egress.bpf.c b/src/bpf/tc_gut_egress.bpf.c
+index d328ec0..1b8188b 100644
+--- a/src/bpf/tc_gut_egress.bpf.c
++++ b/src/bpf/tc_gut_egress.bpf.c
+@@ -600,6 +600,17 @@ int gut_egress(struct __sk_buff *skb)
+ #elif defined(GUT_MODE_GUT)
+     __u8 *quic = (__u8 *)data + new_quic_off;
+     write_gut_header(quic, data_end, ppn, enc_ports, pad_len);
++    if (wg_type == 4)
++    {
++        if (wg_len < WG_MIN_PACKET || ((wg_len - WG_MIN_PACKET) & 0x0F))
++            return TC_ACT_OK;
++        __u32 len_code = (wg_len - WG_MIN_PACKET) >> 4;
++        if (len_code > 255)
++            return TC_ACT_OK;
++        if (quic + GUT_HEADER_SIZE > (__u8 *)data_end)
++            return TC_ACT_OK;
++        quic[8] = (__u8)len_code;
++    }
+ #else  /* GUT_MODE_QUIC */
+     __u8 *quic = (__u8 *)data + new_quic_off;
+     if (outer_hdr_len == GUT_QUIC_SHORT_HEADER_SIZE)
+diff --git a/src/bpf/xdp_gut_ingress.bpf.c b/src/bpf/xdp_gut_ingress.bpf.c
+index ac5e0aa..1620684 100644
+--- a/src/bpf/xdp_gut_ingress.bpf.c
++++ b/src/bpf/xdp_gut_ingress.bpf.c
+@@ -776,10 +776,9 @@ static __always_inline int gut_xdp_core(struct xdp_md *ctx, struct gut_config *c
+     }
+     else if (wg_type == 4)
+     {
+-        if (ballast_len > 63 || ballast_len > wg_len)
+-            return -1;
+-        restored_wg_len = wg_len - ballast_len;
+-        if (restored_wg_len < WG_MIN_PACKET)
++        __u32 len_code = quic[8];
++        restored_wg_len = WG_MIN_PACKET + (len_code << 4);
++        if (restored_wg_len < WG_MIN_PACKET || restored_wg_len > wg_len)
+             return -1;
+     }
+     else
+-- 
+2.43.0
+
