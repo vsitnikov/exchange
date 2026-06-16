@@ -1,0 +1,56 @@
+From f258157b1dc887de1934312566dd6aaa55c33896 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 16 Jun 2026 21:38:38 +0000
+Subject: [PATCH] Write GUT data length metadata via skb helper
+
+---
+ src/bpf/tc_gut_egress.bpf.c   | 4 ++--
+ src/bpf/xdp_gut_ingress.bpf.c | 9 ++++++++-
+ 2 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/bpf/tc_gut_egress.bpf.c b/src/bpf/tc_gut_egress.bpf.c
+index 1b8188b..a836881 100644
+--- a/src/bpf/tc_gut_egress.bpf.c
++++ b/src/bpf/tc_gut_egress.bpf.c
+@@ -607,9 +607,9 @@ int gut_egress(struct __sk_buff *skb)
+         __u32 len_code = (wg_len - WG_MIN_PACKET) >> 4;
+         if (len_code > 255)
+             return TC_ACT_OK;
+-        if (quic + GUT_HEADER_SIZE > (__u8 *)data_end)
++        __u8 len_byte = (__u8)len_code;
++        if (bpf_skb_store_bytes(skb, new_quic_off + 8, &len_byte, 1, 0) < 0)
+             return TC_ACT_OK;
+-        quic[8] = (__u8)len_code;
+     }
+ #else  /* GUT_MODE_QUIC */
+     __u8 *quic = (__u8 *)data + new_quic_off;
+diff --git a/src/bpf/xdp_gut_ingress.bpf.c b/src/bpf/xdp_gut_ingress.bpf.c
+index 1620684..bbe813e 100644
+--- a/src/bpf/xdp_gut_ingress.bpf.c
++++ b/src/bpf/xdp_gut_ingress.bpf.c
+@@ -779,7 +779,11 @@ static __always_inline int gut_xdp_core(struct xdp_md *ctx, struct gut_config *c
+         __u32 len_code = quic[8];
+         restored_wg_len = WG_MIN_PACKET + (len_code << 4);
+         if (restored_wg_len < WG_MIN_PACKET || restored_wg_len > wg_len)
+-            return -1;
++            return -2;
++        if (ballast_len > 63)
++            return -2;
++        if (wg_len - restored_wg_len != ballast_len)
++            return -2;
+     }
+     else
+     {
+@@ -1375,6 +1379,9 @@ int xdp_gut_ingress(struct xdp_md *ctx)
+     int rc = gut_xdp_core(ctx, cfg);
+     if (rc != 0)
+     {
++        if (rc == -2)
++            return XDP_DROP;
++
+ #if defined(GUT_MODE_QUIC)
+         /* QUIC mode: tail-call to probe handler to stay within verifier
+          * budget on kernel ≤6.2.  On tail-call failure, fall through. */
+-- 
+2.43.0
+
