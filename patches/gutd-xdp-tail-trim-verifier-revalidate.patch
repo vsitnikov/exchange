@@ -1,0 +1,36 @@
+From d46d130e9656325d9303b0d5c69c0f4ab0901d66 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 16 Jun 2026 16:59:59 +0000
+Subject: [PATCH] Revalidate IP headers after GUT XDP tail trim
+
+---
+ src/bpf/xdp_gut_ingress.bpf.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/bpf/xdp_gut_ingress.bpf.c b/src/bpf/xdp_gut_ingress.bpf.c
+index 4e09962..66a795c 100644
+--- a/src/bpf/xdp_gut_ingress.bpf.c
++++ b/src/bpf/xdp_gut_ingress.bpf.c
+@@ -820,6 +820,19 @@ static __always_inline int gut_xdp_core(struct xdp_md *ctx, struct gut_config *c
+ 
+     __u16 new_udp_len = (__u16)(udp_len - tail_total - outer_hdr_len);
+ #endif
++    if (ipver == 4)
++    {
++        struct iphdr *iph_check = (void *)((__u8 *)data + ip_off);
++        if ((void *)(iph_check + 1) > data_end)
++            return -1;
++    }
++    else
++    {
++        struct ipv6hdr *ip6h_check = (void *)((__u8 *)data + ip_off);
++        if ((void *)(ip6h_check + 1) > data_end)
++            return -1;
++    }
++
+     udph->len = bpf_htons(new_udp_len);
+     udph->check = 0;
+ 
+-- 
+2.43.0
+
