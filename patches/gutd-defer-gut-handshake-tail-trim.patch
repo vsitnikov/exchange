@@ -1,0 +1,42 @@
+From 9e11edc8669d8b119f89fbfedf51a56abc8990a0 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 16 Jun 2026 17:24:19 +0000
+Subject: [PATCH] Defer GUT handshake tail trim until after decapsulation
+
+---
+ src/bpf/xdp_gut_ingress.bpf.c | 19 ++-----------------
+ 1 file changed, 2 insertions(+), 17 deletions(-)
+
+diff --git a/src/bpf/xdp_gut_ingress.bpf.c b/src/bpf/xdp_gut_ingress.bpf.c
+index 66a795c..ac5e0aa 100644
+--- a/src/bpf/xdp_gut_ingress.bpf.c
++++ b/src/bpf/xdp_gut_ingress.bpf.c
+@@ -791,23 +791,8 @@ static __always_inline int gut_xdp_core(struct xdp_md *ctx, struct gut_config *c
+         return -1;
+ 
+     __u32 tail_total = wg_len - restored_wg_len;
+-    if (tail_total > 0)
+-    {
+-        if (bpf_xdp_adjust_tail(ctx, -((int)tail_total)) < 0)
+-            return -1;
+-
+-        data = (void *)(__u64)ctx->data;
+-        data_end = (void *)(__u64)ctx->data_end;
+-        eth = data;
+-        if ((void *)(eth + 1) > data_end)
+-            return -1;
+-        udph = (void *)((__u8 *)data + udp_off);
+-        if ((void *)(udph + 1) > data_end)
+-            return -1;
+-        wg = (__u8 *)data + wg_off + outer_hdr_len;
+-        if (wg + restored_wg_len > (__u8 *)data_end)
+-            return -1;
+-    }
++    if (tail_total > 63)
++        return -1;
+ 
+     __u16 new_udp_len = (__u16)(sizeof(struct udphdr) + restored_wg_len);
+ #else
+-- 
+2.43.0
+

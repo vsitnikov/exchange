@@ -1,0 +1,33 @@
+From 9eaf9064fb05fed35bf4b257cedf60f3a024d86c Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Wed, 17 Jun 2026 00:00:43 +0000
+Subject: [PATCH] Finalize GUT type4 metadata with full header rewrite
+
+---
+ src/bpf/tc_gut_egress.bpf.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/bpf/tc_gut_egress.bpf.c b/src/bpf/tc_gut_egress.bpf.c
+index aa2d357..e4dfff0 100644
+--- a/src/bpf/tc_gut_egress.bpf.c
++++ b/src/bpf/tc_gut_egress.bpf.c
+@@ -788,10 +788,13 @@ int gut_egress(struct __sk_buff *skb)
+ #if defined(GUT_MODE_GUT)
+     if (wg_type == 4)
+     {
+-        __u8 *gut_lenp = (__u8 *)data + udp_off + sizeof(struct udphdr) + 8;
+-        if (gut_lenp + 1 > (__u8 *)data_end)
++        __u8 gut_hdr[GUT_HEADER_SIZE];
++        __builtin_memcpy(gut_hdr + 0, &ppn, 4);
++        __builtin_memcpy(gut_hdr + 4, &enc_ports, 4);
++        gut_hdr[8] = gut_type4_len_byte;
++        gut_hdr[9] = (pad_len > 0) ? (0x40 | ((__u8)(pad_len - 1) & 0x3F)) : 0x00;
++        if (bpf_skb_store_bytes(skb, udp_off + sizeof(struct udphdr), gut_hdr, GUT_HEADER_SIZE, 0) < 0)
+             return TC_ACT_OK;
+-        *gut_lenp = gut_type4_len_byte;
+     }
+ #endif
+ 
+-- 
+2.43.0
+

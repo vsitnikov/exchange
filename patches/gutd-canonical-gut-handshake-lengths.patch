@@ -1,0 +1,91 @@
+From cc122ab52be0842011f2b227471d2abf95daa608 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 16 Jun 2026 15:31:24 +0000
+Subject: [PATCH] Restore canonical GUT handshake lengths on XDP ingress
+
+---
+ src/bpf/xdp_gut_ingress.bpf.c | 60 +++++++++++++++++++++++++++++++++--
+ 1 file changed, 58 insertions(+), 2 deletions(-)
+
+diff --git a/src/bpf/xdp_gut_ingress.bpf.c b/src/bpf/xdp_gut_ingress.bpf.c
+index 703d980..4e09962 100644
+--- a/src/bpf/xdp_gut_ingress.bpf.c
++++ b/src/bpf/xdp_gut_ingress.bpf.c
+@@ -754,6 +754,63 @@ static __always_inline int gut_xdp_core(struct xdp_md *ctx, struct gut_config *c
+     }
+ #endif
+ 
++#if defined(GUT_MODE_GUT)
++    __u32 restored_wg_len = wg_len;
++    if (wg_type == 1)
++    {
++        if (wg_len < 148)
++            return -1;
++        restored_wg_len = 148;
++    }
++    else if (wg_type == 2)
++    {
++        if (wg_len < 92)
++            return -1;
++        restored_wg_len = 92;
++    }
++    else if (wg_type == 3)
++    {
++        if (wg_len < 64)
++            return -1;
++        restored_wg_len = 64;
++    }
++    else if (wg_type == 4)
++    {
++        if (ballast_len > 63 || ballast_len > wg_len)
++            return -1;
++        restored_wg_len = wg_len - ballast_len;
++        if (restored_wg_len < WG_MIN_PACKET)
++            return -1;
++    }
++    else
++    {
++        return -1;
++    }
++
++    if (restored_wg_len > wg_len)
++        return -1;
++
++    __u32 tail_total = wg_len - restored_wg_len;
++    if (tail_total > 0)
++    {
++        if (bpf_xdp_adjust_tail(ctx, -((int)tail_total)) < 0)
++            return -1;
++
++        data = (void *)(__u64)ctx->data;
++        data_end = (void *)(__u64)ctx->data_end;
++        eth = data;
++        if ((void *)(eth + 1) > data_end)
++            return -1;
++        udph = (void *)((__u8 *)data + udp_off);
++        if ((void *)(udph + 1) > data_end)
++            return -1;
++        wg = (__u8 *)data + wg_off + outer_hdr_len;
++        if (wg + restored_wg_len > (__u8 *)data_end)
++            return -1;
++    }
++
++    __u16 new_udp_len = (__u16)(sizeof(struct udphdr) + restored_wg_len);
++#else
+     if (ballast_len > 63 || ballast_len > wg_len)
+         return -1;
+ 
+@@ -761,9 +818,8 @@ static __always_inline int gut_xdp_core(struct xdp_md *ctx, struct gut_config *c
+     if (wg_len < tail_total || wg_len - tail_total < WG_MIN_PACKET)
+         return -1;
+ 
+-    // "нам ничего не надо считать от конца пакета!!" -> we removed meta extraction.
+-
+     __u16 new_udp_len = (__u16)(udp_len - tail_total - outer_hdr_len);
++#endif
+     udph->len = bpf_htons(new_udp_len);
+     udph->check = 0;
+ 
+-- 
+2.43.0
+

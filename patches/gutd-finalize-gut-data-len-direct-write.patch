@@ -1,0 +1,28 @@
+From cafecb34bb5012917034de25464c66cd0744b997 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Tue, 16 Jun 2026 23:14:54 +0000
+Subject: [PATCH] Finalize GUT data length metadata with direct write
+
+---
+ src/bpf/tc_gut_egress.bpf.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/bpf/tc_gut_egress.bpf.c b/src/bpf/tc_gut_egress.bpf.c
+index d2e222f..aa2d357 100644
+--- a/src/bpf/tc_gut_egress.bpf.c
++++ b/src/bpf/tc_gut_egress.bpf.c
+@@ -788,8 +788,10 @@ int gut_egress(struct __sk_buff *skb)
+ #if defined(GUT_MODE_GUT)
+     if (wg_type == 4)
+     {
+-        if (bpf_skb_store_bytes(skb, new_quic_off + 8, &gut_type4_len_byte, 1, 0) < 0)
++        __u8 *gut_lenp = (__u8 *)data + udp_off + sizeof(struct udphdr) + 8;
++        if (gut_lenp + 1 > (__u8 *)data_end)
+             return TC_ACT_OK;
++        *gut_lenp = gut_type4_len_byte;
+     }
+ #endif
+ 
+-- 
+2.43.0
+
