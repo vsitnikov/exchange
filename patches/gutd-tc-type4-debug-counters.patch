@@ -1,0 +1,361 @@
+From e070bd17b8b58ce2e79662f90734f2477227341f Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Wed, 17 Jun 2026 00:44:52 +0000
+Subject: [PATCH] Add GUT type4 TC egress debug counters
+
+---
+ src/bpf/gut_common.h        | 30 +++++++++++++++++++
+ src/bpf/tc_gut_egress.bpf.c | 59 +++++++++++++++++++++++++++++++++++++
+ src/main.rs                 | 42 ++++++++++++++++++++++++++
+ src/tc/loader.rs            | 41 ++++++++++++++++++++++++--
+ src/tc/maps.rs              | 24 +++++++++++++++
+ 5 files changed, 194 insertions(+), 2 deletions(-)
+
+diff --git a/src/bpf/gut_common.h b/src/bpf/gut_common.h
+index 4cdb5f8..6fbb3c3 100644
+--- a/src/bpf/gut_common.h
++++ b/src/bpf/gut_common.h
+@@ -172,6 +172,28 @@ struct gut_stats
+     __u64 packets_ingress; /* XDP ingress: outer→WG (de-obfuscated) packets received */
+ };
+ 
++struct tc_debug_stats
++{
++    __u64 tc_dbg_egress_total;
++    __u64 tc_dbg_gut_mode_total;
++    __u64 tc_dbg_wg_type1;
++    __u64 tc_dbg_wg_type2;
++    __u64 tc_dbg_wg_type3;
++    __u64 tc_dbg_wg_type4;
++    __u64 tc_dbg_type4_wg_len_128;
++    __u64 tc_dbg_type4_dynamic_peer;
++    __u64 tc_dbg_type4_fixed_peer;
++    __u64 tc_dbg_type4_metadata_attempt;
++    __u64 tc_dbg_type4_metadata_success;
++    __u64 tc_dbg_type4_metadata_fail;
++    __u64 tc_dbg_type4_after_final_header_byte8_is_06;
++    __u64 tc_dbg_type4_after_final_header_byte8_not_06;
++    __u64 tc_dbg_type4_store_offset_last;
++    __u64 tc_dbg_type4_wg_len_last;
++    __u64 tc_dbg_type4_len_code_last;
++    __u64 tc_dbg_type4_final_byte8_last;
++};
++
+ /* Monotonic sequence counter for packets */
+ struct gut_counters
+ {
+@@ -195,6 +217,14 @@ struct
+     __type(value, struct gut_stats);
+ } stats_map SEC(".maps");
+ 
++struct
++{
++    __uint(type, BPF_MAP_TYPE_ARRAY);
++    __uint(max_entries, 1);
++    __type(key, __u32);
++    __type(value, struct tc_debug_stats);
++} tc_debug_map SEC(".maps");
++
+ /* Atomic counters map */
+ struct
+ {
+diff --git a/src/bpf/tc_gut_egress.bpf.c b/src/bpf/tc_gut_egress.bpf.c
+index e4dfff0..ff6c458 100644
+--- a/src/bpf/tc_gut_egress.bpf.c
++++ b/src/bpf/tc_gut_egress.bpf.c
+@@ -86,6 +86,9 @@ int gut_egress(struct __sk_buff *skb)
+         return TC_ACT_OK;
+ 
+     struct gut_stats *stats = bpf_map_lookup_elem(&stats_map, &zero);
++    struct tc_debug_stats *tc_dbg = bpf_map_lookup_elem(&tc_debug_map, &zero);
++    if (tc_dbg)
++        __sync_fetch_and_add(&tc_dbg->tc_dbg_egress_total, 1);
+     /* stats is per-CPU; NULL means kernel memory error — only gated writes below */
+ 
+     if (skb->len < 14 + 20 + 8 + WG_MIN_PACKET)
+@@ -158,6 +161,29 @@ int gut_egress(struct __sk_buff *skb)
+     __u8 wg_type = wg_head[0] & 0x1F;
+     if (wg_type < 1 || wg_type > 4 || wg_head[1] != 0 || wg_head[2] != 0)
+         return TC_ACT_OK;
++    if (tc_dbg)
++    {
++        if (wg_type == 1)
++            __sync_fetch_and_add(&tc_dbg->tc_dbg_wg_type1, 1);
++        else if (wg_type == 2)
++            __sync_fetch_and_add(&tc_dbg->tc_dbg_wg_type2, 1);
++        else if (wg_type == 3)
++            __sync_fetch_and_add(&tc_dbg->tc_dbg_wg_type3, 1);
++        else if (wg_type == 4)
++        {
++            __sync_fetch_and_add(&tc_dbg->tc_dbg_wg_type4, 1);
++            if (wg_len == 128)
++                __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_wg_len_128, 1);
++            if (cfg->dynamic_peer)
++            {
++                __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_dynamic_peer, 1);
++            }
++            else
++            {
++                __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_fixed_peer, 1);
++            }
++        }
++    }
+ 
+     /* Keepalive drop: WG type=4, size=32 (empty transport).
+      * Drop probabilistically on egress so the packet never hits the wire,
+@@ -600,6 +626,8 @@ int gut_egress(struct __sk_buff *skb)
+ #elif defined(GUT_MODE_GUT)
+     __u8 *quic = (__u8 *)data + new_quic_off;
+     __u8 gut_type4_len_byte = 0;
++    if (tc_dbg)
++        __sync_fetch_and_add(&tc_dbg->tc_dbg_gut_mode_total, 1);
+     write_gut_header(quic, data_end, ppn, enc_ports, pad_len);
+     if (wg_type == 4)
+     {
+@@ -609,6 +637,11 @@ int gut_egress(struct __sk_buff *skb)
+         if (len_code > 255)
+             return TC_ACT_OK;
+         gut_type4_len_byte = (__u8)len_code;
++        if (tc_dbg)
++        {
++            tc_dbg->tc_dbg_type4_wg_len_last = wg_len;
++            tc_dbg->tc_dbg_type4_len_code_last = len_code;
++        }
+     }
+ #else  /* GUT_MODE_QUIC */
+     __u8 *quic = (__u8 *)data + new_quic_off;
+@@ -788,13 +821,39 @@ int gut_egress(struct __sk_buff *skb)
+ #if defined(GUT_MODE_GUT)
+     if (wg_type == 4)
+     {
++        if (tc_dbg)
++        {
++            __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_metadata_attempt, 1);
++            tc_dbg->tc_dbg_type4_store_offset_last = udp_off + sizeof(struct udphdr);
++        }
+         __u8 gut_hdr[GUT_HEADER_SIZE];
+         __builtin_memcpy(gut_hdr + 0, &ppn, 4);
+         __builtin_memcpy(gut_hdr + 4, &enc_ports, 4);
+         gut_hdr[8] = gut_type4_len_byte;
+         gut_hdr[9] = (pad_len > 0) ? (0x40 | ((__u8)(pad_len - 1) & 0x3F)) : 0x00;
+         if (bpf_skb_store_bytes(skb, udp_off + sizeof(struct udphdr), gut_hdr, GUT_HEADER_SIZE, 0) < 0)
++        {
++            if (tc_dbg)
++                __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_metadata_fail, 1);
+             return TC_ACT_OK;
++        }
++        if (tc_dbg)
++        {
++            __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_metadata_success, 1);
++            __u8 final_byte8 = 0;
++            if (bpf_skb_load_bytes(skb, udp_off + sizeof(struct udphdr) + 8, &final_byte8, 1) == 0)
++            {
++                tc_dbg->tc_dbg_type4_final_byte8_last = final_byte8;
++                if (final_byte8 == 0x06)
++                    __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_after_final_header_byte8_is_06, 1);
++                else
++                    __sync_fetch_and_add(&tc_dbg->tc_dbg_type4_after_final_header_byte8_not_06, 1);
++                if (wg_len == 128)
++                    bpf_printk("tc_dbg type4 len128 dyn=%u wg_len=%u code=%u off=%u byte8=0x%x",
++                               cfg->dynamic_peer, wg_len, (__u32)gut_type4_len_byte,
++                               udp_off + sizeof(struct udphdr), (__u32)final_byte8);
++            }
++        }
+     }
+ #endif
+ 
+diff --git a/src/main.rs b/src/main.rs
+index f0ea12f..651ac75 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -75,6 +75,28 @@ fn print_bpf_stats(managers: &[gutd::tc::TcBpfManager]) {
+                     stats.egress.packets_fragmented,
+                     stats.egress.packets_oversized
+                 );
++                let d = stats.debug;
++                eprintln!(
++                    "    tc_dbg egress_total={} gut_mode_total={} wg_type1={} wg_type2={} wg_type3={} wg_type4={} type4_len128={} type4_dynamic={} type4_fixed={} metadata_attempt={} metadata_success={} metadata_fail={} byte8_is_06={} byte8_not_06={} store_offset_last={} wg_len_last={} len_code_last={} final_byte8_last=0x{:02x}",
++                    d.tc_dbg_egress_total,
++                    d.tc_dbg_gut_mode_total,
++                    d.tc_dbg_wg_type1,
++                    d.tc_dbg_wg_type2,
++                    d.tc_dbg_wg_type3,
++                    d.tc_dbg_wg_type4,
++                    d.tc_dbg_type4_wg_len_128,
++                    d.tc_dbg_type4_dynamic_peer,
++                    d.tc_dbg_type4_fixed_peer,
++                    d.tc_dbg_type4_metadata_attempt,
++                    d.tc_dbg_type4_metadata_success,
++                    d.tc_dbg_type4_metadata_fail,
++                    d.tc_dbg_type4_after_final_header_byte8_is_06,
++                    d.tc_dbg_type4_after_final_header_byte8_not_06,
++                    d.tc_dbg_type4_store_offset_last,
++                    d.tc_dbg_type4_wg_len_last,
++                    d.tc_dbg_type4_len_code_last,
++                    d.tc_dbg_type4_final_byte8_last,
++                );
+             }
+             Err(e) => eprintln!("  [{}] Failed to read BPF stats: {e}", manager.interface()),
+         }
+@@ -159,6 +181,25 @@ fn dump_counters_file(
+                     "{peer}_ingress_oversized={}",
+                     stats.ingress.packets_oversized
+                 );
++                let d = stats.debug;
++                let _ = writeln!(buf, "{peer}_tc_dbg_egress_total={}", d.tc_dbg_egress_total);
++                let _ = writeln!(buf, "{peer}_tc_dbg_gut_mode_total={}", d.tc_dbg_gut_mode_total);
++                let _ = writeln!(buf, "{peer}_tc_dbg_wg_type1={}", d.tc_dbg_wg_type1);
++                let _ = writeln!(buf, "{peer}_tc_dbg_wg_type2={}", d.tc_dbg_wg_type2);
++                let _ = writeln!(buf, "{peer}_tc_dbg_wg_type3={}", d.tc_dbg_wg_type3);
++                let _ = writeln!(buf, "{peer}_tc_dbg_wg_type4={}", d.tc_dbg_wg_type4);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_wg_len_128={}", d.tc_dbg_type4_wg_len_128);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_dynamic_peer={}", d.tc_dbg_type4_dynamic_peer);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_fixed_peer={}", d.tc_dbg_type4_fixed_peer);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_metadata_attempt={}", d.tc_dbg_type4_metadata_attempt);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_metadata_success={}", d.tc_dbg_type4_metadata_success);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_metadata_fail={}", d.tc_dbg_type4_metadata_fail);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_after_final_header_byte8_is_06={}", d.tc_dbg_type4_after_final_header_byte8_is_06);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_after_final_header_byte8_not_06={}", d.tc_dbg_type4_after_final_header_byte8_not_06);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_store_offset_last={}", d.tc_dbg_type4_store_offset_last);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_wg_len_last={}", d.tc_dbg_type4_wg_len_last);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_len_code_last={}", d.tc_dbg_type4_len_code_last);
++                let _ = writeln!(buf, "{peer}_tc_dbg_type4_final_byte8_last={}", d.tc_dbg_type4_final_byte8_last);
+             }
+             Err(e) => {
+                 let _ = writeln!(buf, "{peer}_bpf_stats_error={e}");
+@@ -475,6 +516,7 @@ fn run_daemon(config: config::Config, reload_source: Option<String>) -> Result<(
+                 stats_tick += 1;
+                 if stats_tick >= stats_ticks_target {
+                     stats_tick = 0;
++                    print_bpf_stats(&managers);
+                     dump_counters_file(&stat_file, start.elapsed().as_secs_f64(), &managers);
+                 }
+             }
+diff --git a/src/tc/loader.rs b/src/tc/loader.rs
+index 8dfc2db..979ce70 100644
+--- a/src/tc/loader.rs
++++ b/src/tc/loader.rs
+@@ -31,10 +31,11 @@ use crate::netlink::{
+     probe_neighbor_udp, read_gso_max_size, read_mac, read_mtu,
+ };
+ use crate::tc::maps::{
+-    GutConfig, GutStats, DEFAULT_INNER_MTU, GUT_FLAG_NEED_L4_CSUM, OUTER_OVERHEAD_IPV4,
++    GutConfig, GutStats, TcDebugStats, DEFAULT_INNER_MTU, GUT_FLAG_NEED_L4_CSUM, OUTER_OVERHEAD_IPV4,
+     OUTER_OVERHEAD_IPV6,
+ };
+ use crate::Result;
++use std::os::fd::AsRawFd;
+ use std::sync::atomic::Ordering;
+ #[cfg(not(target_has_atomic = "64"))]
+ use std::sync::Mutex;
+@@ -332,6 +333,7 @@ impl EgressSkel {
+                     "config_map" => Some($s.maps.config_map.as_fd()),
+                     "counters_map" => Some($s.maps.counters_map.as_fd()),
+                     "stats_map" => Some($s.maps.stats_map.as_fd()),
++                    "tc_debug_map" => Some($s.maps.tc_debug_map.as_fd()),
+                     "scratch_map" => Some($s.maps.scratch_map.as_fd()),
+                     _ => None,
+                 }
+@@ -628,6 +630,7 @@ pub struct TcBpfManager {
+ pub struct TcStats {
+     pub egress: GutStats,
+     pub ingress: GutStats,
++    pub debug: TcDebugStats,
+ }
+ 
+ #[cfg(target_os = "linux")]
+@@ -2029,7 +2032,26 @@ impl TcBpfManager {
+             .map(|per_cpu| Self::parse_percpu_stats(&per_cpu, value_size))
+             .unwrap_or_default();
+ 
+-        Ok(TcStats { egress, ingress })
++        let debug = self
++            .egress_skel
++            .get_map_fd("tc_debug_map")
++            .and_then(|fd| Self::lookup_array_raw(fd.as_raw_fd(), &key, std::mem::size_of::<TcDebugStats>()))
++            .map(|bytes| Self::parse_tc_debug_stats(&bytes))
++            .unwrap_or_default();
++
++        Ok(TcStats { egress, ingress, debug })
++    }
++
++    #[cfg(all(target_os = "linux", feature = "tc_ebpf"))]
++    fn lookup_array_raw(map_fd: i32, key: &[u8], value_size: usize) -> Option<Vec<u8>> {
++        let mut buf = vec![0u8; value_size];
++        let ret = unsafe {
++            libbpf_sys::bpf_map_lookup_elem(map_fd, key.as_ptr().cast(), buf.as_mut_ptr().cast())
++        };
++        if ret < 0 {
++            return None;
++        }
++        Some(buf)
+     }
+ 
+     /// Read a PERCPU_ARRAY map entry by raw FD.
+@@ -2074,6 +2096,21 @@ impl TcBpfManager {
+         GutStats::aggregate(&per_cpu)
+     }
+ 
++    #[cfg(all(target_os = "linux", feature = "tc_ebpf"))]
++    fn parse_tc_debug_stats(data: &[u8]) -> TcDebugStats {
++        let mut stats = TcDebugStats::default();
++        if data.len() >= std::mem::size_of::<TcDebugStats>() {
++            unsafe {
++                std::ptr::copy_nonoverlapping(
++                    data.as_ptr(),
++                    (&raw mut stats).cast::<u8>(),
++                    std::mem::size_of::<TcDebugStats>(),
++                );
++            }
++        }
++        stats
++    }
++
+     #[cfg(not(all(target_os = "linux", feature = "tc_ebpf")))]
+     pub fn get_stats(&self) -> Result<TcStats> {
+         Ok(TcStats::default())
+diff --git a/src/tc/maps.rs b/src/tc/maps.rs
+index d81f612..603110c 100644
+--- a/src/tc/maps.rs
++++ b/src/tc/maps.rs
+@@ -194,6 +194,29 @@ pub struct GutStats {
+     pub packets_ingress: u64, // XDP ingress: outer→WG packets received
+ }
+ 
++#[repr(C)]
++#[derive(Clone, Copy, Debug, Default)]
++pub struct TcDebugStats {
++    pub tc_dbg_egress_total: u64,
++    pub tc_dbg_gut_mode_total: u64,
++    pub tc_dbg_wg_type1: u64,
++    pub tc_dbg_wg_type2: u64,
++    pub tc_dbg_wg_type3: u64,
++    pub tc_dbg_wg_type4: u64,
++    pub tc_dbg_type4_wg_len_128: u64,
++    pub tc_dbg_type4_dynamic_peer: u64,
++    pub tc_dbg_type4_fixed_peer: u64,
++    pub tc_dbg_type4_metadata_attempt: u64,
++    pub tc_dbg_type4_metadata_success: u64,
++    pub tc_dbg_type4_metadata_fail: u64,
++    pub tc_dbg_type4_after_final_header_byte8_is_06: u64,
++    pub tc_dbg_type4_after_final_header_byte8_not_06: u64,
++    pub tc_dbg_type4_store_offset_last: u64,
++    pub tc_dbg_type4_wg_len_last: u64,
++    pub tc_dbg_type4_len_code_last: u64,
++    pub tc_dbg_type4_final_byte8_last: u64,
++}
++
+ /// Offload capability flags — mirrors GUT_FLAG_* in gut_common.h
+ pub const GUT_FLAG_NEED_L4_CSUM: u16 = 1 << 0;
+ 
+@@ -213,6 +236,7 @@ fn compute_chacha_init(key: &[u8; 32]) -> [u32; 12] {
+ 
+ const _: [(); 628] = [(); std::mem::size_of::<GutConfig>()];
+ const _: [(); 72] = [(); std::mem::size_of::<GutStats>()];
++const _: [(); 144] = [(); std::mem::size_of::<TcDebugStats>()];
+ 
+ impl GutStats {
+     #[must_use]
+-- 
+2.43.0
+
